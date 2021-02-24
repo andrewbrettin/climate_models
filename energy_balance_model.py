@@ -6,12 +6,15 @@ energy_balance_model.py
 
 import numpy as np
 import xarray as xr
+import matplotlib.pyplot as plt
+from matplotlib.animation import FuncAnimation
 
 from scipy.constants import sigma
 from scipy.integrate import solve_ivp
 from scipy.special import legendre
 
 import warnings
+import time
 
 class EnergyBalanceModel:
     """
@@ -50,7 +53,7 @@ class EnergyBalanceModel:
         self.D = D
         self.T_grid = xr.DataArray([])
     
-    def run_model(self, res=10.0, dt=1, N=1000, 
+    def run_model(self, res=1.0, dt=1e4, N=100, 
                   T_0=lambda x : 300 - (5/810) * x**2,
                  method='RK45'):
         """
@@ -97,25 +100,22 @@ class EnergyBalanceModel:
         # Timestep T_grid
         for n in range(N-1):
             # Define previous T values
-            last_T = self.T_grid.isel(time=n)
+            T_last = self.T_grid.isel(time=n)
 
             # Define RHS of ODE (without diffusion)
             F = lambda t, T : 1/self.c_p * (self.S_0(phis) * (1 - self.alpha(T)) 
                                        - (1 - self.epsilon/2) * sigma * T**4)
-            print('t_n:', ts[n])
-            print('t_n+1:', ts[n+1])
-            print('T[n]:', np.array(last_T))
-            print()
-            ode_sol = solve_ivp(F, (ts[n], ts[n+1]), np.array(last_T), method=method, t_eval=(ts[n], ts[n+1]))
+            
+            ode_sol = solve_ivp(F, (ts[n], ts[n+1]), np.array(T_last), method=method, t_eval=(ts[n], ts[n+1]))
             T_ode = ode_sol.y[:,1]
 
-
             # Diffusive component
-            T_diffuse = xr.zeros_like(last_T)
-            T_diffuse.loc[{'latitude':phis[0]}] = r*last_T.isel(latitude=1) + (1 - r)*last_T.isel(latitude=0)
-            T_diffuse.loc[{'latitude':phis[-1]}] = (1 - r)*last_T.isel(latitude=-1) + r*last_T.isel(latitude=-2)
+            T_diffuse = xr.zeros_like(T_last)
+            T_diffuse.loc[{'latitude':phis[0]}] = r*T_last.isel(latitude=1) + (1 - r)*T_last.isel(latitude=0)
+            T_diffuse.loc[{'latitude':phis[-1]}] = (1 - r)*T_last.isel(latitude=-1) + r*T_last.isel(latitude=-2)
             for j in range(1, J-1):
-                T_diffuse.loc[{'latitude':phis[j]}] = r*last_T.isel(latitude=j+1) + (1 - 2*r)*last_T.isel(latitude=j) + r*last_T.isel(latitude=j-1)
+                T_diffuse.loc[{'latitude':phis[j]}] = r*T_last.isel(latitude=j+1) + (1 - 2*r)*T_last.isel(latitude=j) + r*T_last.isel(latitude=j-1)
+            T_diffuse = T_diffuse - T_last # Want to know the change from the present state
 
             # Superimpose diffusion plus ODE components to get next timestep:
             self.T_grid.loc[{'time': ts[n+1]}] = T_ode + T_diffuse
@@ -123,10 +123,25 @@ class EnergyBalanceModel:
         return self.T_grid
         
     def show_animation(self):
-        ### TO DO
-        pass
+        """
+        Shows an animation of the simulation.
+        """
+        phis = self.T_grid['latitude']
+        ts = self.T_grid['time']
+
+        fig, ax = plt.subplots()
+        ax.set(xlim=(-90, 90), ylim=(250, 300), 
+            xlabel='Latitude', ylabel='Temperature')
+
+        line = ax.plot(phis, self.T_grid.isel(time=0), color='g')[0]
+
+        def animate(i):
+            line.set_ydata(self.T_grid.isel(time=i))
+
+        anim = FuncAnimation(fig, animate, interval=100, frames=len(ts)-1)
         
-        
+        plt.draw()
+        plt.show()
         
         
         
