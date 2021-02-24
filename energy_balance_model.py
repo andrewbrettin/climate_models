@@ -11,6 +11,7 @@ from scipy.constants import sigma
 from scipy.integrate import solve_ivp
 from scipy.special import legendre
 
+import warnings
 
 class EnergyBalanceModel:
     """
@@ -24,7 +25,7 @@ class EnergyBalanceModel:
     
     Parameters: 
         c_p : float
-            Heat capacity per square meter [j K^-1 m^-2].
+            Heat capacity per square meter [J K^-1 m^-2].
         S_0 : callable
             Insolation per square meter (function of latitude) [W m^-2].
         alpha : callable
@@ -39,7 +40,7 @@ class EnergyBalanceModel:
     """
     
     
-    def __init__(self, c_p=4e7, epsilon=0.76, D=1,
+    def __init__(self, c_p=4e7, epsilon=0.76, D=5.30e13,
                  S_0=lambda phi : 230 * np.exp(-phi**2/1800) + 170,
                  alpha=lambda T: 0.6 if abs(T) < 273 else 0.3):
         self.c_p = c_p
@@ -49,7 +50,7 @@ class EnergyBalanceModel:
         self.D = D
         self.T_grid = xr.DataArray([])
     
-    def run_model(self, res=1.0, dt=1e4, N=1000, 
+    def run_model(self, res=10.0, dt=1, N=1000, 
                   T_0=lambda x : 300 - (5/810) * x**2,
                  method='RK45'):
         """
@@ -78,32 +79,46 @@ class EnergyBalanceModel:
         if not method in ['RK45', 'RK23', 'DOP853', 'Radau', 'BDF', 'LSODA']:
             raise ValueError('ODE integration scheme undefined. See \
                 scipy.integrate.solve_ivp for a list of acceptable methods.')
+            
+        # Check CFL condition for diffusive component
+        r = (self.D / self.c_p) * (dt / res**2)
+        if r >= 1/2:
+            warnings.warn('Unstable timestep for diffusion term.')
 
         # Initialize T_grid
         ts = dt*np.arange(0,N)
         phis = np.arange(-90, 90+res, res)
+        J = len(phis)
         
         data = np.zeros((N, len(phis)))
         self.T_grid = xr.DataArray(data, dims=('time', 'latitude'), coords={'time': ts, 'latitude': phis})
         self.T_grid.loc[{'time': 0}] = [T_0(phi) for phi in phis]
         
-        # Check CFL condition for diffusive component
-        r = (self.D / self.c_p) * (dt / res**2)
-        if r >= 1/2:
-            raise ValueError('CFL condition not satisfied')
-        
         # Timestep T_grid
         for n in range(N-1):
+            # Define previous T values
+            last_T = self.T_grid.isel(time=n)
+
             # Define RHS of ODE (without diffusion)
             F = lambda t, T : 1/self.c_p * (self.S_0(phis) * (1 - self.alpha(T)) 
                                        - (1 - self.epsilon/2) * sigma * T**4)
-            ode_sol = solve_ivp(F, (ts[n], ts[n+1]), self.T_grid.isel(time=n), method=method, t_eval=(ts[n], ts[n+1]))
+            print('t_n:', ts[n])
+            print('t_n+1:', ts[n+1])
+            print('T[n]:', np.array(last_T))
+            print()
+            ode_sol = solve_ivp(F, (ts[n], ts[n+1]), np.array(last_T), method=method, t_eval=(ts[n], ts[n+1]))
             T_ode = ode_sol.y[:,1]
 
-            # Diffusive component
-            ### TO DO
 
-            self.T_grid.loc[{'time': ts[n+1]}] = T_ode #+ T_diffuse
+            # Diffusive component
+            T_diffuse = xr.zeros_like(last_T)
+            T_diffuse.loc[{'latitude':phis[0]}] = r*last_T.isel(latitude=1) + (1 - r)*last_T.isel(latitude=0)
+            T_diffuse.loc[{'latitude':phis[-1]}] = (1 - r)*last_T.isel(latitude=-1) + r*last_T.isel(latitude=-2)
+            for j in range(1, J-1):
+                T_diffuse.loc[{'latitude':phis[j]}] = r*last_T.isel(latitude=j+1) + (1 - 2*r)*last_T.isel(latitude=j) + r*last_T.isel(latitude=j-1)
+
+            # Superimpose diffusion plus ODE components to get next timestep:
+            self.T_grid.loc[{'time': ts[n+1]}] = T_ode + T_diffuse
             
         return self.T_grid
         
